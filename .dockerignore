@@ -1,0 +1,12 @@
+.git
+.idea
+.vscode
+.azure-china
+.azure-china-chrome
+node_modules
+apps/*/node_modules
+apps/*/dist
+npm-debug.log
+*.log
+.env
+.env.local

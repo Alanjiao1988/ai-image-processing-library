@@ -1,0 +1,24 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "openAiName": {
+      "value": "__REPLACE_WITH_OPENAI_RESOURCE_NAME__"
+    },
+    "location": {
+      "value": "eastus"
+    },
+    "deploymentName": {
+      "value": "gpt-image-1.5"
+    },
+    "modelName": {
+      "value": "gpt-image-1.5"
+    },
+    "modelVersion": {
+      "value": "2025-04-14"
+    },
+    "skuCapacity": {
+      "value": 1
+    }
+  }
+}

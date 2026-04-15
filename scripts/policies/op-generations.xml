@@ -1,0 +1,66 @@
+<!--
+  Operation policy: POST /images/generations
+  Routes JSON body to Foundry image generation endpoint.
+  Normalizes successful response to the project's standard envelope.
+-->
+<policies>
+  <inbound>
+    <base />
+    <set-variable name="backendUrl" value="@{
+      var deployment = &quot;{{openai-images-deployment-name}}&quot;;
+      var apiVer = &quot;{{openai-images-api-version}}&quot;;
+      return String.Format(&quot;/openai/deployments/{0}/images/generations?api-version={1}&quot;, deployment, apiVer);
+    }" />
+    <rewrite-uri template="@((string)context.Variables[&quot;backendUrl&quot;])" copy-unmatched-params="false" />
+  </inbound>
+
+  <backend>
+    <base />
+  </backend>
+
+  <outbound>
+    <base />
+    <choose>
+      <when condition="@(context.Response.StatusCode == 200)">
+        <set-body>@{
+          var requestId = context.Variables.ContainsKey("requestId")
+            ? (string)context.Variables["requestId"]
+            : context.RequestId.ToString();
+          var body = context.Response.Body.As<JObject>(preserveContent: true);
+
+          var created = body?["created"] != null
+            ? body["created"].Value<long>()
+            : DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+
+          var images = new JArray();
+          var data = body?["data"] as JArray;
+          if (data != null) {
+            foreach (var item in data) {
+              var imageObj = new JObject(
+                new JProperty("b64_json", item["b64_json"]?.ToString() ?? ""),
+                new JProperty("mime_type", "image/png")
+              );
+              if (item["revised_prompt"] != null) {
+                imageObj.Add(new JProperty("revised_prompt", item["revised_prompt"].ToString()));
+              }
+              images.Add(imageObj);
+            }
+          }
+
+          return new JObject(
+            new JProperty("success", true),
+            new JProperty("request_id", requestId),
+            new JProperty("provider", "azure-foundry"),
+            new JProperty("mode", "text_to_image"),
+            new JProperty("created", created),
+            new JProperty("images", images)
+          ).ToString();
+        }</set-body>
+      </when>
+    </choose>
+  </outbound>
+
+  <on-error>
+    <base />
+  </on-error>
+</policies>

@@ -1,0 +1,103 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "metadata": {
+    "_generator": {
+      "name": "bicep",
+      "version": "0.42.1.51946",
+      "templateHash": "12507559465424585961"
+    }
+  },
+  "parameters": {
+    "openAiName": {
+      "type": "string",
+      "metadata": {
+        "description": "Azure OpenAI resource name"
+      }
+    },
+    "location": {
+      "type": "string",
+      "defaultValue": "eastus",
+      "metadata": {
+        "description": "Location for the Azure OpenAI resource (must support gpt-image-1.5)"
+      }
+    },
+    "deploymentName": {
+      "type": "string",
+      "defaultValue": "gpt-image-1.5",
+      "metadata": {
+        "description": "Deployment name for gpt-image-1.5"
+      }
+    },
+    "modelName": {
+      "type": "string",
+      "defaultValue": "gpt-image-1.5",
+      "metadata": {
+        "description": "Model name"
+      }
+    },
+    "modelVersion": {
+      "type": "string",
+      "defaultValue": "2025-04-14",
+      "metadata": {
+        "description": "Model version (use latest available)"
+      }
+    },
+    "skuCapacity": {
+      "type": "int",
+      "defaultValue": 1,
+      "metadata": {
+        "description": "SKU capacity (tokens-per-minute in thousands)"
+      }
+    }
+  },
+  "resources": [
+    {
+      "type": "Microsoft.CognitiveServices/accounts",
+      "apiVersion": "2024-10-01",
+      "name": "[parameters('openAiName')]",
+      "location": "[parameters('location')]",
+      "kind": "OpenAI",
+      "sku": {
+        "name": "S0"
+      },
+      "properties": {
+        "customSubDomainName": "[parameters('openAiName')]",
+        "publicNetworkAccess": "Enabled"
+      }
+    },
+    {
+      "type": "Microsoft.CognitiveServices/accounts/deployments",
+      "apiVersion": "2024-10-01",
+      "name": "[format('{0}/{1}', parameters('openAiName'), parameters('deploymentName'))]",
+      "sku": {
+        "name": "Standard",
+        "capacity": "[parameters('skuCapacity')]"
+      },
+      "properties": {
+        "model": {
+          "format": "OpenAI",
+          "name": "[parameters('modelName')]",
+          "version": "[parameters('modelVersion')]"
+        }
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.CognitiveServices/accounts', parameters('openAiName'))]"
+      ]
+    }
+  ],
+  "outputs": {
+    "endpoint": {
+      "type": "string",
+      "value": "[reference(resourceId('Microsoft.CognitiveServices/accounts', parameters('openAiName')), '2024-10-01').endpoint]"
+    },
+    "resourceId": {
+      "type": "string",
+      "value": "[resourceId('Microsoft.CognitiveServices/accounts', parameters('openAiName'))]"
+    },
+    "deploymentName": {
+      "type": "string",
+      "value": "[parameters('deploymentName')]"
+    }
+  }
+}

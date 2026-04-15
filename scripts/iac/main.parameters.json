@@ -1,0 +1,30 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "apimName": {
+      "value": "__REPLACE_WITH_APIM_NAME__"
+    },
+    "foundryEndpoint": {
+      "value": "__REPLACE_WITH_FOUNDRY_ENDPOINT__"
+    },
+    "foundryApiKey": {
+      "value": "__REPLACE_WITH_FOUNDRY_KEY__"
+    },
+    "foundryDeploymentName": {
+      "value": "gpt-image-1.5"
+    },
+    "foundryApiVersion": {
+      "value": "2025-04-01-preview"
+    },
+    "gatewayBearerToken": {
+      "value": "__REPLACE_WITH_GATEWAY_TOKEN__"
+    },
+    "rateLimitPerMinute": {
+      "value": 30
+    },
+    "backendTimeoutSeconds": {
+      "value": 120
+    }
+  }
+}

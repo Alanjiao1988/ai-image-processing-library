@@ -1,0 +1,305 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "metadata": {
+    "_generator": {
+      "name": "bicep",
+      "version": "0.42.1.51946",
+      "templateHash": "15014423524665362178"
+    }
+  },
+  "parameters": {
+    "apimName": {
+      "type": "string",
+      "metadata": {
+        "description": "Name of the existing APIM instance in this resource group"
+      }
+    },
+    "apiDisplayName": {
+      "type": "string",
+      "defaultValue": "OpenAI Images v1",
+      "metadata": {
+        "description": "Display name for the new API"
+      }
+    },
+    "foundryEndpoint": {
+      "type": "string",
+      "metadata": {
+        "description": "Azure OpenAI endpoint (e.g. https://xxx.openai.azure.com)"
+      }
+    },
+    "foundryDeploymentName": {
+      "type": "string",
+      "defaultValue": "gpt-image-1-5",
+      "metadata": {
+        "description": "Foundry deployment name for gpt-image-1.5"
+      }
+    },
+    "foundryApiVersion": {
+      "type": "string",
+      "defaultValue": "2025-04-01-preview",
+      "metadata": {
+        "description": "Foundry API version"
+      }
+    },
+    "rateLimitPerMinute": {
+      "type": "int",
+      "defaultValue": 30,
+      "metadata": {
+        "description": "Rate limit: max calls per minute per IP"
+      }
+    },
+    "backendTimeoutSeconds": {
+      "type": "int",
+      "defaultValue": 120,
+      "metadata": {
+        "description": "Backend timeout in seconds (image generation can be slow)"
+      }
+    }
+  },
+  "variables": {
+    "$fxv#0": "<!--\r\n  API-level shared policy for openai-images-v1.\r\n  Applied to ALL operations before individual operation policies.\r\n  \r\n  Caller auth: APIM subscription key (header: api-key)\r\n  Backend auth: APIM managed identity → Azure AD token → Azure OpenAI\r\n  \r\n  Handles: request-id, rate-limit, managed identity auth, timeout, error normalization.\r\n-->\r\n<policies>\r\n  <inbound>\r\n    <base />\r\n\r\n    <!-- ── 1. Generate / propagate request_id ── -->\r\n    <set-variable name=\"requestId\" value=\"@{\r\n      var clientId = context.Request.Headers.GetValueOrDefault(&quot;X-Request-Id&quot;, &quot;&quot;);\r\n      return string.IsNullOrEmpty(clientId) ? context.RequestId.ToString() : clientId;\r\n    }\" />\r\n    <set-header name=\"X-Request-Id\" exists-action=\"override\">\r\n      <value>@((string)context.Variables[\"requestId\"])</value>\r\n    </set-header>\r\n\r\n    <!-- ── 2. Rate limiting per caller IP ── -->\r\n    <rate-limit-by-key calls=\"{{openai-images-rate-limit}}\" renewal-period=\"60\" counter-key=\"@(context.Request.IpAddress)\" />\r\n\r\n    <!-- ── 3. Strip any client auth headers, set backend URL ── -->\r\n    <set-header name=\"Authorization\" exists-action=\"delete\" />\r\n    <set-header name=\"api-key\" exists-action=\"delete\" />\r\n    <set-backend-service base-url=\"{{openai-images-foundry-endpoint}}\" />\r\n\r\n    <!-- ── 4. Authenticate to Azure OpenAI via managed identity ── -->\r\n    <authentication-managed-identity resource=\"https://cognitiveservices.azure.com\" />\r\n\r\n  </inbound>\r\n\r\n  <backend>\r\n    <forward-request timeout=\"{{openai-images-timeout}}\" />\r\n  </backend>\r\n\r\n  <outbound>\r\n    <base />\r\n    <!-- Inject request_id header into every response -->\r\n    <set-header name=\"X-Request-Id\" exists-action=\"override\">\r\n      <value>@((string)context.Variables[\"requestId\"])</value>\r\n    </set-header>\r\n  </outbound>\r\n\r\n  <on-error>\r\n    <base />\r\n    <!-- Unified error normalization -->\r\n    <set-variable name=\"errorCode\" value=\"@{\r\n      var status = context.Response != null ? context.Response.StatusCode : 500;\r\n      if (context.LastError != null &amp;&amp; context.LastError.Reason == &quot;OperationTimedOut&quot;) {\r\n        return &quot;UPSTREAM_TIMEOUT&quot;;\r\n      }\r\n      switch (status) {\r\n        case 400: return &quot;INVALID_REQUEST&quot;;\r\n        case 401: return &quot;UNAUTHORIZED&quot;;\r\n        case 403: return &quot;FORBIDDEN&quot;;\r\n        case 404: return &quot;NOT_FOUND&quot;;\r\n        case 429: return &quot;RATE_LIMITED&quot;;\r\n        default: return status >= 500 ? &quot;UPSTREAM_ERROR&quot; : &quot;INTERNAL_ERROR&quot;;\r\n      }\r\n    }\" />\r\n    <set-variable name=\"errorStatus\" value=\"@{\r\n      var code = (string)context.Variables[&quot;errorCode&quot;];\r\n      switch (code) {\r\n        case &quot;INVALID_REQUEST&quot;: return 400;\r\n        case &quot;UNAUTHORIZED&quot;: return 401;\r\n        case &quot;FORBIDDEN&quot;: return 403;\r\n        case &quot;NOT_FOUND&quot;: return 404;\r\n        case &quot;RATE_LIMITED&quot;: return 429;\r\n        case &quot;UPSTREAM_TIMEOUT&quot;: return 504;\r\n        case &quot;UPSTREAM_ERROR&quot;: return 502;\r\n        default: return 500;\r\n      }\r\n    }\" />\r\n    <set-variable name=\"errorMessage\" value=\"@{\r\n      if (context.Response != null) {\r\n        try {\r\n          var body = context.Response.Body.As&lt;JObject&gt;(preserveContent: true);\r\n          var err = body?[&quot;error&quot;];\r\n          if (err != null) {\r\n            var innerErr = err[&quot;innererror&quot;];\r\n            if (innerErr != null) {\r\n              var filterCode = innerErr[&quot;code&quot;]?.ToString();\r\n              if (filterCode == &quot;ResponsibleAIPolicyViolation&quot;) {\r\n                return &quot;Content filtered by safety policy.&quot;;\r\n              }\r\n            }\r\n            var msg = err[&quot;message&quot;]?.ToString();\r\n            if (!string.IsNullOrEmpty(msg)) {\r\n              return msg;\r\n            }\r\n          }\r\n        } catch { }\r\n      }\r\n      if (context.LastError != null) {\r\n        return context.LastError.Message;\r\n      }\r\n      return &quot;An unexpected error occurred.&quot;;\r\n    }\" />\r\n    <set-variable name=\"finalErrorCode\" value=\"@{\r\n      var msg = (string)context.Variables[&quot;errorMessage&quot;];\r\n      if (msg.Contains(&quot;Content filtered&quot;) || msg.Contains(&quot;ResponsibleAIPolicyViolation&quot;) || msg.Contains(&quot;safety policy&quot;)) {\r\n        return &quot;CONTENT_FILTERED&quot;;\r\n      }\r\n      return (string)context.Variables[&quot;errorCode&quot;];\r\n    }\" />\r\n\r\n    <return-response>\r\n      <set-status code=\"@((int)context.Variables[&quot;errorStatus&quot;])\" reason=\"Error\" />\r\n      <set-header name=\"Content-Type\" exists-action=\"override\">\r\n        <value>application/json</value>\r\n      </set-header>\r\n      <set-header name=\"X-Request-Id\" exists-action=\"override\">\r\n        <value>@(context.Variables.ContainsKey(&quot;requestId&quot;) ? (string)context.Variables[&quot;requestId&quot;] : context.RequestId.ToString())</value>\r\n      </set-header>\r\n      <set-body>@{\r\n        var requestId = context.Variables.ContainsKey(\"requestId\") ? (string)context.Variables[\"requestId\"] : context.RequestId.ToString();\r\n        return new JObject(\r\n          new JProperty(\"success\", false),\r\n          new JProperty(\"request_id\", requestId),\r\n          new JProperty(\"error\", new JObject(\r\n            new JProperty(\"code\", (string)context.Variables[\"finalErrorCode\"]),\r\n            new JProperty(\"message\", (string)context.Variables[\"errorMessage\"])\r\n          ))\r\n        ).ToString();\r\n      }</set-body>\r\n    </return-response>\r\n  </on-error>\r\n</policies>\r\n",
+    "$fxv#1": "<!--\r\n  Operation policy: POST /images/generations\r\n  Routes JSON body to Foundry image generation endpoint.\r\n  Normalizes successful response to the project's standard envelope.\r\n-->\r\n<policies>\r\n  <inbound>\r\n    <base />\r\n    <set-variable name=\"backendUrl\" value=\"@{\r\n      var deployment = &quot;{{openai-images-deployment-name}}&quot;;\r\n      var apiVer = &quot;{{openai-images-api-version}}&quot;;\r\n      return String.Format(&quot;/openai/deployments/{0}/images/generations?api-version={1}&quot;, deployment, apiVer);\r\n    }\" />\r\n    <rewrite-uri template=\"@((string)context.Variables[&quot;backendUrl&quot;])\" copy-unmatched-params=\"false\" />\r\n  </inbound>\r\n\r\n  <backend>\r\n    <base />\r\n  </backend>\r\n\r\n  <outbound>\r\n    <base />\r\n    <choose>\r\n      <when condition=\"@(context.Response.StatusCode == 200)\">\r\n        <set-body>@{\r\n          var requestId = context.Variables.ContainsKey(\"requestId\")\r\n            ? (string)context.Variables[\"requestId\"]\r\n            : context.RequestId.ToString();\r\n          var body = context.Response.Body.As<JObject>(preserveContent: true);\r\n\r\n          var created = body?[\"created\"] != null\r\n            ? body[\"created\"].Value<long>()\r\n            : DateTimeOffset.UtcNow.ToUnixTimeSeconds();\r\n\r\n          var images = new JArray();\r\n          var data = body?[\"data\"] as JArray;\r\n          if (data != null) {\r\n            foreach (var item in data) {\r\n              var imageObj = new JObject(\r\n                new JProperty(\"b64_json\", item[\"b64_json\"]?.ToString() ?? \"\"),\r\n                new JProperty(\"mime_type\", \"image/png\")\r\n              );\r\n              if (item[\"revised_prompt\"] != null) {\r\n                imageObj.Add(new JProperty(\"revised_prompt\", item[\"revised_prompt\"].ToString()));\r\n              }\r\n              images.Add(imageObj);\r\n            }\r\n          }\r\n\r\n          return new JObject(\r\n            new JProperty(\"success\", true),\r\n            new JProperty(\"request_id\", requestId),\r\n            new JProperty(\"provider\", \"azure-foundry\"),\r\n            new JProperty(\"mode\", \"text_to_image\"),\r\n            new JProperty(\"created\", created),\r\n            new JProperty(\"images\", images)\r\n          ).ToString();\r\n        }</set-body>\r\n      </when>\r\n    </choose>\r\n  </outbound>\r\n\r\n  <on-error>\r\n    <base />\r\n  </on-error>\r\n</policies>\r\n",
+    "$fxv#2": "<!--\r\n  Operation policy: POST /images/edits\r\n  Forwards multipart/form-data to Foundry image edit endpoint.\r\n  Normalizes successful response to the project's standard envelope.\r\n-->\r\n<policies>\r\n  <inbound>\r\n    <base />\r\n    <set-variable name=\"backendUrl\" value=\"@{\r\n      var deployment = &quot;{{openai-images-deployment-name}}&quot;;\r\n      var apiVer = &quot;{{openai-images-api-version}}&quot;;\r\n      return String.Format(&quot;/openai/deployments/{0}/images/edits?api-version={1}&quot;, deployment, apiVer);\r\n    }\" />\r\n    <rewrite-uri template=\"@((string)context.Variables[&quot;backendUrl&quot;])\" copy-unmatched-params=\"false\" />\r\n  </inbound>\r\n\r\n  <backend>\r\n    <base />\r\n  </backend>\r\n\r\n  <outbound>\r\n    <base />\r\n    <choose>\r\n      <when condition=\"@(context.Response.StatusCode == 200)\">\r\n        <set-body>@{\r\n          var requestId = context.Variables.ContainsKey(\"requestId\")\r\n            ? (string)context.Variables[\"requestId\"]\r\n            : context.RequestId.ToString();\r\n          var body = context.Response.Body.As<JObject>(preserveContent: true);\r\n\r\n          var created = body?[\"created\"] != null\r\n            ? body[\"created\"].Value<long>()\r\n            : DateTimeOffset.UtcNow.ToUnixTimeSeconds();\r\n\r\n          var images = new JArray();\r\n          var data = body?[\"data\"] as JArray;\r\n          if (data != null) {\r\n            foreach (var item in data) {\r\n              var imageObj = new JObject(\r\n                new JProperty(\"b64_json\", item[\"b64_json\"]?.ToString() ?? \"\"),\r\n                new JProperty(\"mime_type\", \"image/png\")\r\n              );\r\n              if (item[\"revised_prompt\"] != null) {\r\n                imageObj.Add(new JProperty(\"revised_prompt\", item[\"revised_prompt\"].ToString()));\r\n              }\r\n              images.Add(imageObj);\r\n            }\r\n          }\r\n\r\n          return new JObject(\r\n            new JProperty(\"success\", true),\r\n            new JProperty(\"request_id\", requestId),\r\n            new JProperty(\"provider\", \"azure-foundry\"),\r\n            new JProperty(\"mode\", \"image_edit\"),\r\n            new JProperty(\"created\", created),\r\n            new JProperty(\"images\", images)\r\n          ).ToString();\r\n        }</set-body>\r\n      </when>\r\n    </choose>\r\n  </outbound>\r\n\r\n  <on-error>\r\n    <base />\r\n  </on-error>\r\n</policies>\r\n",
+    "$fxv#3": "<!--\r\n  Operation policy: POST /images/variations\r\n  Public path is separate from /images/edits, but internally routes\r\n  to the same Foundry /images/edits endpoint.\r\n  Normalizes successful response with mode=image_variation.\r\n-->\r\n<policies>\r\n  <inbound>\r\n    <base />\r\n    <set-variable name=\"backendUrl\" value=\"@{\r\n      var deployment = &quot;{{openai-images-deployment-name}}&quot;;\r\n      var apiVer = &quot;{{openai-images-api-version}}&quot;;\r\n      return String.Format(&quot;/openai/deployments/{0}/images/edits?api-version={1}&quot;, deployment, apiVer);\r\n    }\" />\r\n    <rewrite-uri template=\"@((string)context.Variables[&quot;backendUrl&quot;])\" copy-unmatched-params=\"false\" />\r\n  </inbound>\r\n\r\n  <backend>\r\n    <base />\r\n  </backend>\r\n\r\n  <outbound>\r\n    <base />\r\n    <choose>\r\n      <when condition=\"@(context.Response.StatusCode == 200)\">\r\n        <set-body>@{\r\n          var requestId = context.Variables.ContainsKey(\"requestId\")\r\n            ? (string)context.Variables[\"requestId\"]\r\n            : context.RequestId.ToString();\r\n          var body = context.Response.Body.As<JObject>(preserveContent: true);\r\n\r\n          var created = body?[\"created\"] != null\r\n            ? body[\"created\"].Value<long>()\r\n            : DateTimeOffset.UtcNow.ToUnixTimeSeconds();\r\n\r\n          var images = new JArray();\r\n          var data = body?[\"data\"] as JArray;\r\n          if (data != null) {\r\n            foreach (var item in data) {\r\n              var imageObj = new JObject(\r\n                new JProperty(\"b64_json\", item[\"b64_json\"]?.ToString() ?? \"\"),\r\n                new JProperty(\"mime_type\", \"image/png\")\r\n              );\r\n              if (item[\"revised_prompt\"] != null) {\r\n                imageObj.Add(new JProperty(\"revised_prompt\", item[\"revised_prompt\"].ToString()));\r\n              }\r\n              images.Add(imageObj);\r\n            }\r\n          }\r\n\r\n          return new JObject(\r\n            new JProperty(\"success\", true),\r\n            new JProperty(\"request_id\", requestId),\r\n            new JProperty(\"provider\", \"azure-foundry\"),\r\n            new JProperty(\"mode\", \"image_variation\"),\r\n            new JProperty(\"created\", created),\r\n            new JProperty(\"images\", images)\r\n          ).ToString();\r\n        }</set-body>\r\n      </when>\r\n    </choose>\r\n  </outbound>\r\n\r\n  <on-error>\r\n    <base />\r\n  </on-error>\r\n</policies>\r\n",
+    "$fxv#4": "<!--\r\n  Operation policy: GET /health\r\n  Returns a gateway health response directly from APIM.\r\n  Optionally probes Foundry reachability with a lightweight send-request.\r\n-->\r\n<policies>\r\n  <inbound>\r\n    <base />\r\n\r\n    <!-- Probe Foundry reachability (lightweight GET to the deployment endpoint) -->\r\n    <send-request mode=\"new\" response-variable-name=\"foundryProbe\" timeout=\"10\" ignore-error=\"true\">\r\n      <set-url>@{\r\n        var endpoint = \"{{openai-images-foundry-endpoint}}\";\r\n        var deployment = \"{{openai-images-deployment-name}}\";\r\n        var apiVer = \"{{openai-images-api-version}}\";\r\n        return String.Format(\"{0}/openai/deployments/{1}?api-version={2}\", endpoint, deployment, apiVer);\r\n      }</set-url>\r\n      <set-method>GET</set-method>\r\n      <authentication-managed-identity resource=\"https://cognitiveservices.azure.com\" />\r\n    </send-request>\r\n\r\n    <set-variable name=\"foundryReachable\" value=\"@{\r\n      if (context.Variables.ContainsKey(&quot;foundryProbe&quot;)) {\r\n        var resp = (IResponse)context.Variables[&quot;foundryProbe&quot;];\r\n        return resp.StatusCode >= 200 &amp;&amp; resp.StatusCode &lt; 500;\r\n      }\r\n      return false;\r\n    }\" />\r\n\r\n    <!-- Return health response directly (don't forward to backend) -->\r\n    <return-response>\r\n      <set-status code=\"200\" reason=\"OK\" />\r\n      <set-header name=\"Content-Type\" exists-action=\"override\">\r\n        <value>application/json</value>\r\n      </set-header>\r\n      <set-header name=\"X-Request-Id\" exists-action=\"override\">\r\n        <value>@(context.Variables.ContainsKey(\"requestId\") ? (string)context.Variables[\"requestId\"] : context.RequestId.ToString())</value>\r\n      </set-header>\r\n      <set-body>@{\r\n        var requestId = context.Variables.ContainsKey(\"requestId\")\r\n          ? (string)context.Variables[\"requestId\"]\r\n          : context.RequestId.ToString();\r\n        var foundryOk = (bool)context.Variables[\"foundryReachable\"];\r\n        var overall = foundryOk ? \"healthy\" : \"degraded\";\r\n\r\n        return new JObject(\r\n          new JProperty(\"success\", true),\r\n          new JProperty(\"request_id\", requestId),\r\n          new JProperty(\"service\", \"ai-gateway\"),\r\n          new JProperty(\"status\", overall),\r\n          new JProperty(\"timestamp\", DateTimeOffset.UtcNow.ToString(\"o\")),\r\n          new JProperty(\"dependencies\", new JObject(\r\n            new JProperty(\"apim\", new JObject(\r\n              new JProperty(\"status\", \"healthy\")\r\n            )),\r\n            new JProperty(\"foundry\", new JObject(\r\n              new JProperty(\"status\", foundryOk ? \"healthy\" : \"unreachable\"),\r\n              new JProperty(\"deployment\", \"{{openai-images-deployment-name}}\")\r\n            ))\r\n          ))\r\n        ).ToString();\r\n      }</set-body>\r\n    </return-response>\r\n  </inbound>\r\n\r\n  <backend>\r\n    <!-- No backend call — handled entirely in inbound -->\r\n    <base />\r\n  </backend>\r\n\r\n  <outbound>\r\n    <base />\r\n  </outbound>\r\n\r\n  <on-error>\r\n    <base />\r\n  </on-error>\r\n</policies>\r\n"
+  },
+  "resources": [
+    {
+      "type": "Microsoft.ApiManagement/service/namedValues",
+      "apiVersion": "2023-09-01-preview",
+      "name": "[format('{0}/{1}', parameters('apimName'), 'openai-images-foundry-endpoint')]",
+      "properties": {
+        "displayName": "openai-images-foundry-endpoint",
+        "value": "[parameters('foundryEndpoint')]",
+        "secret": false
+      }
+    },
+    {
+      "type": "Microsoft.ApiManagement/service/namedValues",
+      "apiVersion": "2023-09-01-preview",
+      "name": "[format('{0}/{1}', parameters('apimName'), 'openai-images-deployment-name')]",
+      "properties": {
+        "displayName": "openai-images-deployment-name",
+        "value": "[parameters('foundryDeploymentName')]",
+        "secret": false
+      }
+    },
+    {
+      "type": "Microsoft.ApiManagement/service/namedValues",
+      "apiVersion": "2023-09-01-preview",
+      "name": "[format('{0}/{1}', parameters('apimName'), 'openai-images-api-version')]",
+      "properties": {
+        "displayName": "openai-images-api-version",
+        "value": "[parameters('foundryApiVersion')]",
+        "secret": false
+      }
+    },
+    {
+      "type": "Microsoft.ApiManagement/service/namedValues",
+      "apiVersion": "2023-09-01-preview",
+      "name": "[format('{0}/{1}', parameters('apimName'), 'openai-images-rate-limit')]",
+      "properties": {
+        "displayName": "openai-images-rate-limit",
+        "value": "[string(parameters('rateLimitPerMinute'))]",
+        "secret": false
+      }
+    },
+    {
+      "type": "Microsoft.ApiManagement/service/namedValues",
+      "apiVersion": "2023-09-01-preview",
+      "name": "[format('{0}/{1}', parameters('apimName'), 'openai-images-timeout')]",
+      "properties": {
+        "displayName": "openai-images-timeout",
+        "value": "[string(parameters('backendTimeoutSeconds'))]",
+        "secret": false
+      }
+    },
+    {
+      "type": "Microsoft.ApiManagement/service/backends",
+      "apiVersion": "2023-09-01-preview",
+      "name": "[format('{0}/{1}', parameters('apimName'), 'openai-images-foundry')]",
+      "properties": {
+        "title": "Azure OpenAI Foundry (gpt-image-1.5)",
+        "description": "Azure Global Foundry endpoint for image generation",
+        "url": "[parameters('foundryEndpoint')]",
+        "protocol": "http",
+        "tls": {
+          "validateCertificateChain": true,
+          "validateCertificateName": true
+        }
+      }
+    },
+    {
+      "type": "Microsoft.ApiManagement/service/apis",
+      "apiVersion": "2023-09-01-preview",
+      "name": "[format('{0}/{1}', parameters('apimName'), 'openai-images-v1')]",
+      "properties": {
+        "displayName": "[parameters('apiDisplayName')]",
+        "description": "OpenAI-style image generation, editing and variation APIs backed by Azure AI Foundry gpt-image-1.5",
+        "path": "v1",
+        "protocols": [
+          "https"
+        ],
+        "subscriptionRequired": true,
+        "subscriptionKeyParameterNames": {
+          "header": "api-key",
+          "query": "api-key"
+        },
+        "apiType": "http",
+        "isCurrent": true
+      }
+    },
+    {
+      "type": "Microsoft.ApiManagement/service/apis/policies",
+      "apiVersion": "2023-09-01-preview",
+      "name": "[format('{0}/{1}/{2}', parameters('apimName'), 'openai-images-v1', 'policy')]",
+      "properties": {
+        "format": "rawxml",
+        "value": "[variables('$fxv#0')]"
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.ApiManagement/service/apis', parameters('apimName'), 'openai-images-v1')]"
+      ]
+    },
+    {
+      "type": "Microsoft.ApiManagement/service/apis/operations",
+      "apiVersion": "2023-09-01-preview",
+      "name": "[format('{0}/{1}/{2}', parameters('apimName'), 'openai-images-v1', 'images-generations')]",
+      "properties": {
+        "displayName": "Create image from text",
+        "method": "POST",
+        "urlTemplate": "/images/generations",
+        "description": "Generate images from a text prompt using gpt-image-1.5"
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.ApiManagement/service/apis', parameters('apimName'), 'openai-images-v1')]"
+      ]
+    },
+    {
+      "type": "Microsoft.ApiManagement/service/apis/operations/policies",
+      "apiVersion": "2023-09-01-preview",
+      "name": "[format('{0}/{1}/{2}/{3}', parameters('apimName'), 'openai-images-v1', 'images-generations', 'policy')]",
+      "properties": {
+        "format": "rawxml",
+        "value": "[variables('$fxv#1')]"
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.ApiManagement/service/apis/operations', parameters('apimName'), 'openai-images-v1', 'images-generations')]"
+      ]
+    },
+    {
+      "type": "Microsoft.ApiManagement/service/apis/operations",
+      "apiVersion": "2023-09-01-preview",
+      "name": "[format('{0}/{1}/{2}', parameters('apimName'), 'openai-images-v1', 'images-edits')]",
+      "properties": {
+        "displayName": "Edit image",
+        "method": "POST",
+        "urlTemplate": "/images/edits",
+        "description": "Edit an existing image with a text prompt"
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.ApiManagement/service/apis', parameters('apimName'), 'openai-images-v1')]"
+      ]
+    },
+    {
+      "type": "Microsoft.ApiManagement/service/apis/operations/policies",
+      "apiVersion": "2023-09-01-preview",
+      "name": "[format('{0}/{1}/{2}/{3}', parameters('apimName'), 'openai-images-v1', 'images-edits', 'policy')]",
+      "properties": {
+        "format": "rawxml",
+        "value": "[variables('$fxv#2')]"
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.ApiManagement/service/apis/operations', parameters('apimName'), 'openai-images-v1', 'images-edits')]"
+      ]
+    },
+    {
+      "type": "Microsoft.ApiManagement/service/apis/operations",
+      "apiVersion": "2023-09-01-preview",
+      "name": "[format('{0}/{1}/{2}', parameters('apimName'), 'openai-images-v1', 'images-variations')]",
+      "properties": {
+        "displayName": "Create image variation",
+        "method": "POST",
+        "urlTemplate": "/images/variations",
+        "description": "Create a variation of an existing image"
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.ApiManagement/service/apis', parameters('apimName'), 'openai-images-v1')]"
+      ]
+    },
+    {
+      "type": "Microsoft.ApiManagement/service/apis/operations/policies",
+      "apiVersion": "2023-09-01-preview",
+      "name": "[format('{0}/{1}/{2}/{3}', parameters('apimName'), 'openai-images-v1', 'images-variations', 'policy')]",
+      "properties": {
+        "format": "rawxml",
+        "value": "[variables('$fxv#3')]"
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.ApiManagement/service/apis/operations', parameters('apimName'), 'openai-images-v1', 'images-variations')]"
+      ]
+    },
+    {
+      "type": "Microsoft.ApiManagement/service/apis/operations",
+      "apiVersion": "2023-09-01-preview",
+      "name": "[format('{0}/{1}/{2}', parameters('apimName'), 'openai-images-v1', 'health')]",
+      "properties": {
+        "displayName": "Health check",
+        "method": "GET",
+        "urlTemplate": "/health",
+        "description": "Gateway health check with optional Foundry reachability probe"
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.ApiManagement/service/apis', parameters('apimName'), 'openai-images-v1')]"
+      ]
+    },
+    {
+      "type": "Microsoft.ApiManagement/service/apis/operations/policies",
+      "apiVersion": "2023-09-01-preview",
+      "name": "[format('{0}/{1}/{2}/{3}', parameters('apimName'), 'openai-images-v1', 'health', 'policy')]",
+      "properties": {
+        "format": "rawxml",
+        "value": "[variables('$fxv#4')]"
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.ApiManagement/service/apis/operations', parameters('apimName'), 'openai-images-v1', 'health')]"
+      ]
+    },
+    {
+      "type": "Microsoft.ApiManagement/service/subscriptions",
+      "apiVersion": "2023-09-01-preview",
+      "name": "[format('{0}/{1}', parameters('apimName'), 'zhenjiang-image-sub')]",
+      "properties": {
+        "displayName": "Zhenjiang Image App",
+        "scope": "[resourceId('Microsoft.ApiManagement/service/apis', parameters('apimName'), 'openai-images-v1')]",
+        "state": "active"
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.ApiManagement/service/apis', parameters('apimName'), 'openai-images-v1')]"
+      ]
+    }
+  ],
+  "outputs": {
+    "apiId": {
+      "type": "string",
+      "value": "[resourceId('Microsoft.ApiManagement/service/apis', parameters('apimName'), 'openai-images-v1')]"
+    },
+    "apiPath": {
+      "type": "string",
+      "value": "[reference(resourceId('Microsoft.ApiManagement/service/apis', parameters('apimName'), 'openai-images-v1'), '2023-09-01-preview').path]"
+    },
+    "backendId": {
+      "type": "string",
+      "value": "[resourceId('Microsoft.ApiManagement/service/backends', parameters('apimName'), 'openai-images-foundry')]"
+    },
+    "gatewayUrl": {
+      "type": "string",
+      "value": "[format('{0}/v1', reference(resourceId('Microsoft.ApiManagement/service', parameters('apimName')), '2023-09-01-preview').gatewayUrl)]"
+    },
+    "subscriptionId": {
+      "type": "string",
+      "value": "[resourceId('Microsoft.ApiManagement/service/subscriptions', parameters('apimName'), 'zhenjiang-image-sub')]"
+    }
+  }
+}

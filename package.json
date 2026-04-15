@@ -1,0 +1,21 @@
+{
+  "name": "ai-image-processing-library",
+  "version": "0.1.0",
+  "private": true,
+  "workspaces": [
+    "apps/web",
+    "apps/api"
+  ],
+  "scripts": {
+    "dev": "concurrently \"npm run dev --workspace @ai-image-app/api\" \"npm run dev --workspace @ai-image-app/web\"",
+    "dev:web": "npm run dev --workspace @ai-image-app/web",
+    "dev:api": "npm run dev --workspace @ai-image-app/api",
+    "build": "npm run build --workspace @ai-image-app/api && npm run build --workspace @ai-image-app/web",
+    "db:generate": "npm run prisma:generate --workspace @ai-image-app/api",
+    "db:migrate": "npm run prisma:migrate --workspace @ai-image-app/api"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.2",
+    "typescript": "^5.8.3"
+  }
+}
