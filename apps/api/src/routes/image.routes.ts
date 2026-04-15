@@ -7,6 +7,7 @@ import { env } from "../config/env";
 import { jobService } from "../services/jobs/job.service";
 import { asyncHandler } from "../utils/async-handler";
 import { HttpError } from "../utils/http-error";
+import { isSupportedImageUpload, resolveUploadMimeType } from "../utils/image-upload";
 
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -14,7 +15,7 @@ const upload = multer({
     fileSize: env.MAX_UPLOAD_SIZE_MB * 1024 * 1024,
   },
   fileFilter: (_request, file, callback) => {
-    if (!file.mimetype.startsWith("image/")) {
+    if (!isSupportedImageUpload(file)) {
       callback(new HttpError(400, "INVALID_FILE_TYPE", "仅支持上传图片格式文件。"));
       return;
     }
@@ -57,6 +58,8 @@ imageRouter.post(
       throw new HttpError(400, "MISSING_IMAGE_FILE", "图片编辑模式必须上传一张原始图片。");
     }
 
+    request.file.mimetype = resolveUploadMimeType(request.file);
+
     response
       .status(202)
       .json(await jobService.createImageBasedJob(ImageMode.IMAGE_EDIT, prompt, request.file));
@@ -72,6 +75,8 @@ imageRouter.post(
     if (!request.file) {
       throw new HttpError(400, "MISSING_IMAGE_FILE", "以图生图模式必须上传一张参考图片。");
     }
+
+    request.file.mimetype = resolveUploadMimeType(request.file);
 
     response
       .status(202)

@@ -1,9 +1,11 @@
 const fs = require("node:fs");
 const path = require("node:path");
 const http = require("node:http");
+const https = require("node:https");
 
 const rootDir = path.join(__dirname, "dist");
 const port = Number(process.env.PORT || 8080);
+const apiProxyBaseUrl = process.env.API_PROXY_BASE_URL || "";
 
 const contentTypes = {
   ".css": "text/css; charset=utf-8",
@@ -28,7 +30,65 @@ function sendFile(response, filePath) {
   fs.createReadStream(filePath).pipe(response);
 }
 
+function proxyApiRequest(request, response) {
+  if (!apiProxyBaseUrl) {
+    response.writeHead(502, {
+      "Content-Type": "application/json; charset=utf-8",
+    });
+    response.end(
+      JSON.stringify({
+        error: {
+          code: "API_PROXY_NOT_CONFIGURED",
+          message: "API 代理地址未配置。",
+        },
+      }),
+    );
+    return;
+  }
+
+  const targetUrl = new URL(request.url, apiProxyBaseUrl);
+  const transport = targetUrl.protocol === "https:" ? https : http;
+  const proxyRequest = transport.request(
+    {
+      protocol: targetUrl.protocol,
+      hostname: targetUrl.hostname,
+      port: targetUrl.port || (targetUrl.protocol === "https:" ? 443 : 80),
+      method: request.method,
+      path: `${targetUrl.pathname}${targetUrl.search}`,
+      headers: {
+        ...request.headers,
+        host: targetUrl.host,
+      },
+    },
+    (proxyResponse) => {
+      response.writeHead(proxyResponse.statusCode || 502, proxyResponse.headers);
+      proxyResponse.pipe(response);
+    },
+  );
+
+  proxyRequest.on("error", (error) => {
+    response.writeHead(502, {
+      "Content-Type": "application/json; charset=utf-8",
+    });
+    response.end(
+      JSON.stringify({
+        error: {
+          code: "API_PROXY_ERROR",
+          message: `前端代理请求后端 API 失败：${error.message}`,
+        },
+      }),
+    );
+  });
+
+  request.pipe(proxyRequest);
+}
+
 const server = http.createServer((request, response) => {
+  if ((request.url || "").startsWith("/api/")) {
+    proxyApiRequest(request, response);
+    return;
+  }
+
   const requestedPath = request.url === "/" ? "/index.html" : request.url || "/index.html";
   const sanitizedPath = requestedPath.split("?")[0];
   const targetPath = path.join(rootDir, sanitizedPath);

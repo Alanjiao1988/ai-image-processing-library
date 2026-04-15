@@ -9,6 +9,7 @@ import { extension as getExtension } from "mime-types";
 import { env } from "../../config/env";
 import { logger } from "../../lib/logger";
 import { HttpError } from "../../utils/http-error";
+import { resolveUploadMimeType } from "../../utils/image-upload";
 import type { NormalizedGeneratedImage } from "../../providers/image-provider";
 
 const requiredContainers = [
@@ -116,6 +117,7 @@ export class BlobStorageService {
       );
     }
 
+    const normalizedContentType = resolveUploadMimeType(file);
     const extension = path.extname(file.originalname || "") || ".bin";
     const blobPath = `${new Date().toISOString().slice(0, 10)}/${mode}/${randomUUID()}${extension}`;
     const containerName = env.blobContainers.uploadsTemp;
@@ -125,14 +127,14 @@ export class BlobStorageService {
 
     await blockBlobClient.uploadData(file.buffer, {
       blobHTTPHeaders: {
-        blobContentType: file.mimetype,
+        blobContentType: normalizedContentType,
       },
     });
 
     return {
       containerName,
       blobPath,
-      contentType: file.mimetype,
+      contentType: normalizedContentType,
       size: file.size,
     };
   }

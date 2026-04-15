@@ -1,6 +1,7 @@
 import { GenerationJobStatus, ImageMode } from "@prisma/client";
 import type { Express } from "express";
 
+import { env } from "../../config/env";
 import { logger } from "../../lib/logger";
 import { prisma } from "../../lib/prisma";
 import { imageProvider } from "../../providers/provider-factory";
@@ -14,7 +15,16 @@ const terminalJobStatuses = new Set<GenerationJobStatus>([
 ]);
 
 export class JobService {
+  private readonly executionTimeoutMs = Math.max(
+    env.IMAGE_TIMEOUT_MS * (env.IMAGE_MAX_RETRY + 1) + 60_000,
+    300_000,
+  );
+
+  private readonly staleProcessingThresholdMs = this.executionTimeoutMs + 120_000;
+
   async createTextToImageJob(prompt: string): Promise<JobCreatedResponse> {
+    await this.failStaleProcessingJobs();
+
     const job = await prisma.generationJob.create({
       data: {
         mode: ImageMode.TEXT_TO_IMAGE,
@@ -39,6 +49,8 @@ export class JobService {
     prompt: string,
     file: Express.Multer.File,
   ): Promise<JobCreatedResponse> {
+    await this.failStaleProcessingJobs();
+
     const uploaded = await blobStorageService.uploadTempInput(
       file,
       mode === ImageMode.IMAGE_EDIT ? "edit" : "variation",
@@ -101,10 +113,12 @@ export class JobService {
         throw new HttpError(400, "MISSING_PROMPT", "文生图任务缺少提示词。");
       }
 
-      const generatedImages = await imageProvider.generate({
-        prompt: job.promptText,
-        count: 1,
-      });
+      const generatedImages = await this.runWithExecutionTimeout(
+        imageProvider.generate({
+          prompt: job.promptText,
+          count: 1,
+        }),
+      );
 
       const [firstImage] = generatedImages;
 
@@ -146,16 +160,20 @@ export class JobService {
 
       const generatedImages =
         mode === ImageMode.IMAGE_EDIT
-          ? await imageProvider.edit({
-              prompt: job.promptText ?? "",
-              inputImageBlobPath: job.inputImageBlobPath,
-              count: 1,
-            })
-          : await imageProvider.variation({
-              prompt: job.promptText ?? "",
-              referenceImageBlobPath: job.inputImageBlobPath,
-              count: 1,
-            });
+          ? await this.runWithExecutionTimeout(
+              imageProvider.edit({
+                prompt: job.promptText ?? "",
+                inputImageBlobPath: job.inputImageBlobPath,
+                count: 1,
+              }),
+            )
+          : await this.runWithExecutionTimeout(
+              imageProvider.variation({
+                prompt: job.promptText ?? "",
+                referenceImageBlobPath: job.inputImageBlobPath,
+                count: 1,
+              }),
+            );
 
       const [firstImage] = generatedImages;
 
@@ -257,6 +275,48 @@ export class JobService {
       errorCode: "TEXT_TO_IMAGE_JOB_FAILED",
       errorMessage: "文生图任务执行失败。",
     };
+  }
+
+  private async failStaleProcessingJobs() {
+    const staleBefore = new Date(Date.now() - this.staleProcessingThresholdMs);
+
+    const result = await prisma.generationJob.updateMany({
+      where: {
+        status: GenerationJobStatus.PROCESSING,
+        updatedAt: {
+          lt: staleBefore,
+        },
+      },
+      data: {
+        status: GenerationJobStatus.FAILED,
+        errorCode: "JOB_EXECUTION_TIMEOUT",
+        errorMessage: "任务执行超时，系统已自动结束，请重试。",
+      },
+    });
+
+    if (result.count > 0) {
+      logger.warn(
+        { staleCount: result.count, staleBefore: staleBefore.toISOString() },
+        "Marked stale PROCESSING jobs as FAILED.",
+      );
+    }
+  }
+
+  private async runWithExecutionTimeout<T>(promise: Promise<T>) {
+    return await Promise.race<T>([
+      promise,
+      new Promise<T>((_, reject) => {
+        setTimeout(() => {
+          reject(
+            new HttpError(
+              504,
+              "JOB_EXECUTION_TIMEOUT",
+              `生成任务执行超过 ${this.executionTimeoutMs}ms，已自动终止。`,
+            ),
+          );
+        }, this.executionTimeoutMs);
+      }),
+    ]);
   }
 }
 

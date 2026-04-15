@@ -170,6 +170,32 @@ npm run dev
 - 以图生图生成成功，并可保存到图片库
 - 图片库文件夹中可看到 3 张测试图片，来源模式分别为 `TEXT_TO_IMAGE`、`IMAGE_EDIT`、`IMAGE_VARIATION`
 
+当前推荐体验入口（Azure China Application Gateway）：
+
+- 域名：`http://image-m21426-cn3-20260415.chinanorth3.cloudapp.chinacloudapi.cn`
+- 公网 IP：`http://163.228.243.155`
+
+说明：
+
+- 入口层采用付费 `Standard_v2` Application Gateway，路径路由策略为：
+- `/api/*` 直连 API App Service，避免上传请求经过前端代理导致的 502。
+- 其他路径转发到 Web App Service。
+
+## 故障排查（卡在 PROCESSING）
+
+如果任务长时间停在 `PROCESSING`，优先检查以下三项：
+
+1. 外部模型限流/超时：确认 APIM 或模型端是否持续 `429`，以及 `retry-after` 是否过长。
+2. 任务兜底是否开启：后端已加入任务级执行超时与“陈旧 PROCESSING 自动置为 FAILED”机制。
+3. 入口路由是否正确：确保网关路径路由为 `/api/* -> API`，避免上传型请求走前端反向代理。
+
+相关脚本：
+
+- `scripts/deploy-ingress.ps1`：创建/更新 Application Gateway 公网入口
+- `scripts/deploy-web-only.ps1`：仅部署前端
+- `scripts/deploy-api-only.ps1`：仅部署后端
+- `scripts/hotfix-api-runtime-files.ps1`：快速热更新后端已编译运行时文件
+
 ## 后续扩展方向
 
 - 增加真正的缩略图生成、临时文件清理和存储配额统计优化
